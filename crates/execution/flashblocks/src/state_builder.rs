@@ -18,6 +18,7 @@ use base_common_evm::{BaseHaltReason, L1BlockInfo, ensure_create2_deployer};
 use base_common_flz::tx_estimated_size_fjord as estimate_tx_compressed_size;
 use base_common_rpc_types::{BaseTransactionReceipt, Transaction};
 use base_execution_rpc::BaseReceiptBuilder as BaseRpcReceiptBuilder;
+use base_access_lists::FlashblockAccessList;
 use reth_evm::{Evm, FromRecoveredTx};
 use reth_rpc_convert::transaction::ConvertReceiptInput;
 use revm::{
@@ -68,6 +69,11 @@ pub struct PendingStateBuilder<E, ChainSpec> {
 
     prev_pending_blocks: Option<Arc<PendingBlocks>>,
     state_overrides: StateOverride,
+    /// Optional access list from the builder's flashblock metadata.
+    /// Addresses in this list are pre-loaded into the EVM database
+    /// before re-executing, aligning the consumer's DB cache with
+    /// the builder's state to eliminate execution divergence (see #3274).
+    access_list: Option<FlashblockAccessList>,
 }
 
 impl<E, ChainSpec, DB> PendingStateBuilder<E, ChainSpec>
@@ -85,6 +91,7 @@ where
         prev_pending_blocks: Option<Arc<PendingBlocks>>,
         l1_block_info: L1BlockInfo,
         state_overrides: StateOverride,
+        access_list: Option<FlashblockAccessList>,
     ) -> Self {
         Self {
             pending_block,
@@ -96,6 +103,7 @@ where
             state_overrides,
             chain_spec: chain_spec.clone(),
             receipt_builder: UnifiedReceiptBuilder::new(chain_spec),
+            access_list,
         }
     }
 
@@ -296,6 +304,18 @@ where
         } else {
             0
         };
+        // Pre-load builder-accessed addresses so consumer's DB cache
+        // matches builder's state, addressing divergence in #3274.
+        if let Some(ref access_list) = self.access_list {
+            for account_change in &access_list.account_changes {
+                self.evm
+                    .db_mut()
+                    .basic(account_change.address)
+                    .map_err(|e| {
+                        StateProcessorError::Execution(ExecutionError::EvmEnv(e.to_string()))
+                    })?;
+            }
+        }
 
         let start = Instant::now();
         let transact_result = self.evm.transact(&transaction);
@@ -470,6 +490,7 @@ mod tests {
             None,
             L1BlockInfo::default(),
             Default::default(),
+            None,
         );
 
         let parent_beacon_block_root = B256::from([0xab; 32]);
@@ -526,6 +547,7 @@ mod tests {
             None,
             L1BlockInfo::default(),
             Default::default(),
+            None,
         );
 
         builder
@@ -601,6 +623,7 @@ mod tests {
             None,
             L1BlockInfo::default(),
             StateOverride::default(),
+            None,
         );
 
         let tx = create_legacy_tx();
@@ -656,6 +679,7 @@ mod tests {
             Some(prev_pending_blocks),
             L1BlockInfo::default(),
             StateOverride::default(),
+            None,
         );
 
         let cached_result = second_builder
@@ -707,6 +731,7 @@ mod tests {
             None,
             L1BlockInfo::default(),
             StateOverride::default(),
+            None,
         );
 
         let tx = create_legacy_tx();
@@ -750,6 +775,7 @@ mod tests {
             None,
             L1BlockInfo::default(),
             StateOverride::default(),
+            None,
         );
 
         let tx = create_legacy_tx();
@@ -806,6 +832,7 @@ mod tests {
             None,
             L1BlockInfo::default(),
             StateOverride::default(),
+            None,
         );
 
         let deposit_tx = base_common_consensus::TxDeposit {
@@ -877,6 +904,7 @@ mod tests {
             None,
             L1BlockInfo::default(),
             StateOverride::default(),
+            None,
         );
 
         let tx_a = create_legacy_tx();
@@ -961,6 +989,7 @@ mod tests {
             Some(prev_pending_blocks),
             L1BlockInfo::default(),
             StateOverride::default(),
+            None,
         );
 
         second_builder
